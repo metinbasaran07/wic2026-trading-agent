@@ -94,6 +94,12 @@ class SetupApp:
         y = (self.root.winfo_screenheight() // 2) - (h // 2)
         self.root.geometry(f"{w}x{h}+{x}+{y}")
 
+        # macOS: bring window to front and focus
+        self.root.lift()
+        self.root.attributes('-topmost', True)
+        self.root.after(100, lambda: self.root.attributes('-topmost', False))
+        self.root.focus_force()
+
     def setup_styles(self):
         style = ttk.Style()
         style.theme_use("aqua")

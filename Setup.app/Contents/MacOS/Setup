@@ -3,4 +3,9 @@
 # Double-click to run
 
 cd "$(dirname "$0")/../../.."
-exec python3 setup_app.py "$@"
+exec python3 -c "
+import sys
+sys.path.insert(0, '.')
+from setup_app import main
+main()
+"
