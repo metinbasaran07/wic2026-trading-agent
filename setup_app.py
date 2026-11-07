@@ -112,21 +112,33 @@ class SetupApp:
         style.configure("Provider.TCombobox", font=("SF Pro", 10))
 
     def create_widgets(self):
-        # Scrollable area
-        canvas = tk.Canvas(self.root, highlightthickness=0, bg="#f5f5f7")
-        scrollbar = ttk.Scrollbar(self.root, orient="vertical", command=canvas.yview)
+        # Main container with padding
+        container = ttk.Frame(self.root, style="Card.TFrame")
+        container.pack(fill="both", expand=True, padx=10, pady=10)
+        container.columnconfigure(0, weight=1)
+        container.rowconfigure(0, weight=1)
+
+        # Scrollable canvas
+        canvas = tk.Canvas(container, highlightthickness=0, bg="#f5f5f7")
+        scrollbar = ttk.Scrollbar(container, orient="vertical", command=canvas.yview)
         self.content = ttk.Frame(canvas, style="Card.TFrame")
 
         self.content.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
-        canvas.create_window((0, 0), window=self.content, anchor="nw", width=560)
+        canvas.create_window((0, 0), window=self.content, anchor="nw")
         canvas.configure(yscrollcommand=scrollbar.set)
 
-        canvas.pack(side="left", fill="both", expand=True, padx=10, pady=10)
-        scrollbar.pack(side="right", fill="y", pady=10)
+        canvas.grid(row=0, column=0, sticky="nsew")
+        scrollbar.grid(row=0, column=1, sticky="ns")
+
+        container.columnconfigure(0, weight=1)
+        container.rowconfigure(0, weight=1)
 
         def _on_mousewheel(event):
             canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
         canvas.bind_all("<MouseWheel>", _on_mousewheel)
+
+        # Also bind to content frame for scrolling
+        self.content.bind("<MouseWheel>", _on_mousewheel)
 
         main = self.content
         main.columnconfigure(1, weight=1)
