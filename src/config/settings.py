@@ -59,7 +59,7 @@ class Settings(BaseSettings):
     # LLM Providers
     # =========================================================================
     LLM_PROVIDER: Literal[
-        "openrouter", "anthropic", "openai", "azure", "gemini", "ollama", "team_key", "mock"
+        "openrouter", "anthropic", "openai", "azure", "gemini", "ollama", "nvidia", "team_key", "mock"
     ] = "openrouter"
     """LLM provider to use"""
 
@@ -102,6 +102,13 @@ class Settings(BaseSettings):
     OLLAMA_MODEL: str = "llama3.1:70b"
     OLLAMA_MAX_TOKENS: int = 4096
     OLLAMA_TEMPERATURE: float = 0.1
+
+    # --- NVIDIA (Nemotron) ---
+    NVIDIA_API_KEY: str = ""
+    NVIDIA_BASE_URL: str = "https://integrate.api.nvidia.com/v1"
+    NVIDIA_MODEL: str = "nvidia/nemotron-3-ultra"
+    NVIDIA_MAX_TOKENS: int = 4096
+    NVIDIA_TEMPERATURE: float = 0.1
 
     # --- Team Key (Competition) ---
     TEAM_KEY_API_URL: str = ""
@@ -170,16 +177,12 @@ class Settings(BaseSettings):
     # =========================================================================
     # Trading Universe
     # =========================================================================
-    DEFAULT_SYMBOLS: list[str] = Field(
-        default_factory=lambda: [
-            "SPY", "QQQ", "IWM", "DIA",
-            "AAPL", "MSFT", "NVDA", "GOOGL", "AMZN", "META", "TSLA",
-            "JPM", "BAC", "GS", "MS",
-            "XOM", "CVX",
-            "JNJ", "PFE", "UNH",
-        ]
-    )
+    DEFAULT_SYMBOLS: str = "SPY,QQQ,IWM,DIA,AAPL,MSFT,NVDA,GOOGL,AMZN,META,TSLA,JPM,BAC,GS,MS,XOM,CVX,JNJ,PFE,UNH"
     MAX_SYMBOLS: int = 20
+
+    def get_symbols_list(self) -> list[str]:
+        """Get symbols as a list."""
+        return [s.strip().upper() for s in self.DEFAULT_SYMBOLS.split(",")]
 
     # =========================================================================
     # Execution
@@ -199,13 +202,6 @@ class Settings(BaseSettings):
     @classmethod
     def ensure_path(cls, v: str | Path) -> Path:
         return Path(v) if isinstance(v, str) else v
-
-    @field_validator("DEFAULT_SYMBOLS", mode="before")
-    @classmethod
-    def parse_symbols(cls, v: str | list[str]) -> list[str]:
-        if isinstance(v, str):
-            return [s.strip().upper() for s in v.split(",")]
-        return [s.upper() for s in v]
 
     def get_llm_config(self) -> dict:
         """Get LLM configuration based on provider."""
@@ -262,6 +258,15 @@ class Settings(BaseSettings):
                 "model": self.OLLAMA_MODEL,
                 "max_tokens": self.OLLAMA_MAX_TOKENS,
                 "temperature": self.OLLAMA_TEMPERATURE,
+            }
+        elif provider == "nvidia":
+            return {
+                "provider": "nvidia",
+                "api_key": self.NVIDIA_API_KEY,
+                "base_url": self.NVIDIA_BASE_URL,
+                "model": self.NVIDIA_MODEL,
+                "max_tokens": self.NVIDIA_MAX_TOKENS,
+                "temperature": self.NVIDIA_TEMPERATURE,
             }
         elif provider == "team_key":
             return {

@@ -66,7 +66,7 @@ class MarketDataPipeline:
 
     async def initialize(self, symbols: list[str] | None = None) -> None:
         """Initialize market data for symbols."""
-        symbols = symbols or self.settings.DEFAULT_SYMBOLS[: self.settings.MAX_SYMBOLS]
+        symbols = symbols or self.settings.get_symbols_list()[: self.settings.MAX_SYMBOLS]
         logger.info(f"Initializing market data for {len(symbols)} symbols")
 
         # Create contracts

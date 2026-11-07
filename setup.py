@@ -18,6 +18,7 @@ PROVIDERS = {
     "azure": {"fields": ["api_key", "endpoint", "api_version", "deployment"], "defaults": {"api_version": "2024-02-15-preview"}, "url": "https://azure.microsoft.com/"},
     "gemini": {"fields": ["api_key", "model"], "defaults": {"model": "gemini-1.5-pro"}, "url": "https://aistudio.google.com/"},
     "ollama": {"fields": ["base_url", "model"], "defaults": {"base_url": "http://localhost:11434/v1", "model": "llama3.1:70b"}, "url": "https://ollama.ai/"},
+    "nvidia": {"fields": ["api_key", "model"], "defaults": {"model": "nvidia/nemotron-3-ultra"}, "url": "https://www.nvidia.com/en-us/research/"},
     "team_key": {"fields": ["api_key", "base_url", "model"], "defaults": {}, "url": "Provided by organizers"},
     "mock": {"fields": [], "defaults": {}, "url": "No API needed"},
 }

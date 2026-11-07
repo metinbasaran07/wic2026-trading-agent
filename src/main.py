@@ -128,10 +128,11 @@ async def initialize_strategies() -> None:
     from src.strategy.smc import SMCStrategy, SMCParameters
 
     # SMC Strategy (primary)
+    symbols_list = settings.get_symbols_list()
     smc_params = SMCParameters(
         name="smc",
         enabled=settings.STRATEGY_NAME in ("smc", "combined"),
-        symbols=settings.DEFAULT_SYMBOLS,
+        symbols=symbols_list,
         swing_length=settings.SMC_SWING_LENGTH,
         ob_lookback=settings.SMC_OB_LOOKBACK,
         fvg_min_size=settings.SMC_FVG_MIN_SIZE,
@@ -148,7 +149,7 @@ async def initialize_strategies() -> None:
     mr_params = MeanReversionParameters(
         name="mean_reversion",
         enabled=settings.STRATEGY_NAME in ("mean_reversion", "combined"),
-        symbols=settings.DEFAULT_SYMBOLS,
+        symbols=symbols_list,
     )
     mr_strategy = MeanReversionStrategy(mr_params, market_data)
     strategy_registry.register(mr_strategy)
@@ -157,7 +158,7 @@ async def initialize_strategies() -> None:
     mom_params = MomentumParameters(
         name="momentum",
         enabled=settings.STRATEGY_NAME in ("momentum", "combined"),
-        symbols=settings.DEFAULT_SYMBOLS,
+        symbols=symbols_list,
     )
     mom_strategy = MomentumStrategy(mom_params, market_data)
     strategy_registry.register(mom_strategy)

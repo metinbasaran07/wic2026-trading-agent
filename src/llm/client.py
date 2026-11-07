@@ -626,6 +626,86 @@ class OllamaProvider(LLMProvider):
             raise
 
 
+class NVIDIAProvider(LLMProvider):
+    """NVIDIA Nemotron provider - uses OpenAI-compatible API."""
+
+    def __init__(
+        self,
+        api_key: str,
+        base_url: str = "https://integrate.api.nvidia.com/v1",
+        model: str = "nvidia/nemotron-3-ultra",
+        max_tokens: int = 4096,
+        temperature: float = 0.1,
+    ) -> None:
+        self.client = AsyncOpenAI(api_key=api_key, base_url=base_url)
+        self._model = model
+        self._max_tokens = max_tokens
+        self._temperature = temperature
+        self._provider = "nvidia"
+
+    @property
+    def model_name(self) -> str:
+        return self._model
+
+    @property
+    def provider_name(self) -> str:
+        return self._provider
+
+    async def chat_completion(
+        self,
+        messages: list[dict[str, str]],
+        temperature: float = 0.1,
+        max_tokens: int = 4096,
+        response_format: dict | None = None,
+    ) -> LLMResponse:
+        try:
+            kwargs = {
+                "model": self._model,
+                "messages": messages,
+                "temperature": temperature,
+                "max_tokens": max_tokens,
+            }
+            if response_format:
+                kwargs["response_format"] = response_format
+
+            response = await self.client.chat.completions.create(**kwargs)
+
+            return LLMResponse(
+                content=response.choices[0].message.content or "",
+                model=response.model,
+                usage={
+                    "prompt_tokens": response.usage.prompt_tokens if response.usage else 0,
+                    "completion_tokens": response.usage.completion_tokens if response.usage else 0,
+                    "total_tokens": response.usage.total_tokens if response.usage else 0,
+                },
+                raw_response=response,
+            )
+        except Exception as e:
+            logger.error(f"NVIDIA completion error: {e}")
+            raise
+
+    async def stream_completion(
+        self,
+        messages: list[dict[str, str]],
+        temperature: float = 0.1,
+        max_tokens: int = 4096,
+    ) -> AsyncGenerator[str, None]:
+        try:
+            stream = await self.client.chat.completions.create(
+                model=self._model,
+                messages=messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                stream=True,
+            )
+            async for chunk in stream:
+                if chunk.choices[0].delta.content:
+                    yield chunk.choices[0].delta.content
+        except Exception as e:
+            logger.error(f"NVIDIA streaming error: {e}")
+            raise
+
+
 class TeamKeyProvider(LLMProvider):
     """Competition Team Key provider."""
 
@@ -805,6 +885,14 @@ class LLMClient:
             elif provider == "ollama":
                 self._provider = OllamaProvider(
                     base_url=config.get("base_url", "http://localhost:11434/v1"),
+                    model=config["model"],
+                    max_tokens=config.get("max_tokens", 4096),
+                    temperature=config.get("temperature", 0.1),
+                )
+            elif provider == "nvidia":
+                self._provider = NVIDIAProvider(
+                    api_key=config["api_key"],
+                    base_url=config.get("base_url", "https://integrate.api.nvidia.com/v1"),
                     model=config["model"],
                     max_tokens=config.get("max_tokens", 4096),
                     temperature=config.get("temperature", 0.1),
