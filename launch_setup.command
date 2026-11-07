@@ -1,5 +1,4 @@
 #!/bin/bash
-# Double-click this to open the Setup window
-
+# Double-click to open Setup window
 cd "$(dirname "$0")"
-exec python3 setup_app.py
+exec python3 setup.py
