@@ -1,0 +1,36 @@
+# Parameter Optimization Request
+
+Optimize strategy parameters based on recent performance.
+
+## Current Parameters
+{{ current_params | tojson(indent=2) }}
+
+## Performance Data (Last {{ lookback_days }} days)
+- Total Trades: {{ total_trades }}
+- Win Rate: {{ "%.1f"|format(win_rate * 100) }}%
+- Avg Win: ${{ "%.2f"|format(avg_win) }}
+- Avg Loss: ${{ "%.2f"|format(avg_loss) }}
+- Profit Factor: {{ "%.2f"|format(profit_factor) }}
+- Max Drawdown: {{ "%.2f"|format(max_drawdown * 100) }}%
+- Sharpe: {{ "%.2f"|format(sharpe) }}
+
+## Parameter Bounds
+{{ param_bounds | tojson(indent=2) }}
+
+## Optimization Goal
+Maximize risk-adjusted returns while keeping max drawdown under {{ max_dd_limit * 100 }}%.
+
+Return optimized parameters as JSON:
+```json
+{
+  "optimized_parameters": {
+    "param_name": "value"
+  },
+  "expected_improvement": {
+    "win_rate": 0.55,
+    "profit_factor": 1.5,
+    "max_drawdown": 0.04
+  },
+  "reasoning": "Explanation of changes"
+}
+```

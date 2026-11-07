@@ -1,0 +1,95 @@
+version: '3.8'
+
+services:
+  # IB Gateway (required for TWS API)
+  ib-gateway:
+    image: ghcr.io/ib-gateway/ib-gateway:latest
+    container_name: wic2026-ib-gateway
+    environment:
+      - TWS_USER_ID=${IB_USER}
+      - TWS_PASSWORD=${IB_PASSWORD}
+      - TRADING_MODE=${IB_TRADING_MODE:-paper}  # paper or live
+      - IBC_INI=ibc.ini
+    ports:
+      - "4002:4002"  # Paper trading port
+      - "4001:4001"  # Live trading port
+    volumes:
+      - ./ibc.ini:/root/ibc/ibc.ini:ro
+      - ib-gateway-logs:/root/ibc/logs
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "4002"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  # Trading Agent
+  trading-agent:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: wic2026-trading-agent
+    environment:
+      - MODE=${MODE:-dev}
+      - IB_HOST=ib-gateway
+      - IB_PORT=4002
+      - IB_CLIENT_ID=1
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
+      - OPENROUTER_MODEL=${OPENROUTER_MODEL:-anthropic/claude-3.5-sonnet}
+      - TEAM_KEY_API_URL=${TEAM_KEY_API_URL}
+      - TEAM_KEY_API_KEY=${TEAM_KEY_API_KEY}
+      - TEAM_KEY_MODEL=${TEAM_KEY_MODEL}
+      - LOG_LEVEL=INFO
+      - DASHBOARD_ENABLED=true
+      - DASHBOARD_HOST=0.0.0.0
+      - DASHBOARD_PORT=8080
+    ports:
+      - "8080:8080"
+    volumes:
+      - ../logs:/app/logs
+      - ../reports:/app/reports
+    depends_on:
+      ib-gateway:
+        condition: service_healthy
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 2G
+        reservations:
+          cpus: '1'
+          memory: 1G
+
+  # Monitoring (optional)
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: wic2026-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: wic2026-grafana
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:-admin}
+    volumes:
+      - grafana-data:/var/lib/grafana
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+
+volumes:
+  ib-gateway-logs:
+  grafana-data:
+
+networks:
+  default:
+    name: wic2026-network

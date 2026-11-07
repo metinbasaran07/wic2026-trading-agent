@@ -1,0 +1,85 @@
+# Strategy Review Request
+
+You are an expert quantitative trading analyst reviewing an AI trading agent's strategy for the World Investment Competition 2026.
+
+## Current Strategy State
+
+**Strategy**: {{ strategy_name }}
+**Mode**: {{ mode }} (dev/trial/live)
+**Review Interval**: {{ review_interval_minutes }} minutes
+
+## Market Context
+
+**Current Positions**:
+{% for pos in positions %}
+- {{ pos.symbol }}: {{ pos.quantity }} shares @ ${% if pos.entry_price %}{{ "%.2f"|format(pos.entry_price) }}{% else %}N/A{% endif %} | P&L: ${{ "%.2f"|format(pos.unrealized_pnl) }} ({{ "%.2f"|format(pos.unrealized_pnl_pct) }}%)
+{% endfor %}
+
+**Account Equity**: ${{ "%.2f"|format(account_equity) }}
+**Daily P&L**: ${{ "%.2f"|format(daily_pnl) }}
+**Current Drawdown**: {{ "%.2f"|format(current_drawdown * 100) }}%
+
+## Recent Signals (Last {{ lookback_hours }} hours)
+
+{% for signal in recent_signals %}
+- **{{ signal.symbol }}**: {{ signal.signal_type.value.upper() }} | Strength: {{ signal.strength.name }} | Price: ${{ "%.2f"|format(signal.price) }} | Time: {{ signal.timestamp.strftime('%H:%M') }}
+  - Reason: {{ signal.metadata.get('reason', 'N/A') }}
+{% endfor %}
+
+## SMC Analysis (for SMC Strategy)
+
+{% if smc_state %}
+**{{ symbol }} SMC State**:
+- Market Structure: {{ smc_state.structure_events }} events (recent: {{ smc_state.recent_structure }})
+- Order Blocks: {{ smc_state.order_blocks.bullish }} bullish, {{ smc_state.order_blocks.bearish }} bearish active
+- FVGs: {{ smc_state.fvg.bullish_open }} bullish open, {{ smc_state.fvg.bearish_open }} bearish open
+- Liquidity: {{ smc_state.liquidity.buy_side }} buy-side, {{ smc_state.liquidity.sell_side }} sell-side pools
+- Breaker Blocks: {{ smc_state.breaker_blocks }}
+{% endif %}
+
+## Risk Metrics
+
+- Win Rate: {{ "%.1f"|format(win_rate * 100) }}%
+- Profit Factor: {{ "%.2f"|format(profit_factor) }}
+- Sharpe Ratio: {{ "%.2f"|format(sharpe_ratio) }}
+- Avg Win: ${{ "%.2f"|format(avg_win) }}
+- Avg Loss: ${{ "%.2f"|format(avg_loss) }}
+
+## Review Instructions
+
+Analyze the current strategy performance and provide recommendations in the following JSON format:
+
+```json
+{
+  "overall_assessment": "Brief assessment of strategy performance",
+  "strengths": ["List of what's working well"],
+  "weaknesses": ["List of issues or concerns"],
+  "parameter_adjustments": {
+    "parameter_name": "new_value",
+    "reason": "Why this change is recommended"
+  },
+  "risk_adjustments": {
+    "max_position_size": 0.1,
+    "stop_loss_pct": 0.02,
+    "reason": "Risk adjustment reasoning"
+  },
+  "strategy_changes": [
+    {
+      "change": "Description of strategic change",
+      "reason": "Reasoning",
+      "priority": "high|medium|low"
+    }
+  ],
+  "new_signals_to_watch": ["Symbol1", "Symbol2"],
+  "confidence": 0.85
+}
+```
+
+Focus on:
+1. Are the current strategies performing as expected?
+2. Should any parameters be adjusted based on recent market conditions?
+3. Are risk limits appropriate?
+4. Any new opportunities or threats?
+5. Specific actionable recommendations
+
+Return ONLY the JSON object, no additional text.

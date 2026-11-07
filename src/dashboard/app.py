@@ -1,0 +1,785 @@
+"""FastAPI + HTMX real-time dashboard."""
+
+from __future__ import annotations
+
+import asyncio
+import json
+from contextlib import asynccontextmanager
+from datetime import datetime
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
+
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
+from fastapi.responses import HTMLResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
+from fastapi.templating import Jinja2Templates
+from loguru import logger
+
+from src.config.settings import get_settings
+
+if TYPE_CHECKING:
+    from src.ib.connection import IBConnectionManager
+    from src.ib.market_data import MarketDataPipeline
+    from src.llm.reviewer import LLMStrategyReviewer
+    from src.risk.manager import RiskManager
+    from src.strategy.base import StrategyRegistry
+
+
+# Global references (set by main app)
+ib_manager: IBConnectionManager | None = None
+market_data: MarketDataPipeline | None = None
+risk_manager: RiskManager | None = None
+strategy_registry: StrategyRegistry | None = None
+llm_reviewer: LLMStrategyReviewer | None = None
+
+settings = get_settings()
+
+# Templates
+templates_dir = Path(__file__).parent / "templates"
+templates_dir.mkdir(exist_ok=True)
+templates = Jinja2Templates(directory=str(templates_dir))
+
+# WebSocket connections
+active_websockets: list[WebSocket] = []
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Application lifespan."""
+    logger.info("Dashboard starting up")
+    yield
+    logger.info("Dashboard shutting down")
+
+
+app = FastAPI(
+    title="WIC 2026 Trading Agent Dashboard",
+    description="Real-time monitoring for World Investment Competition 2026 AI Agent",
+    version="0.1.0",
+    lifespan=lifespan,
+)
+
+# Static files (for HTMX, Plotly.js)
+static_dir = Path(__file__).parent / "static"
+static_dir.mkdir(exist_ok=True)
+app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
+
+
+# =========================================================================
+# WebSocket for real-time updates
+# =========================================================================
+
+@app.websocket("/ws")
+async def websocket_endpoint(websocket: WebSocket):
+    """WebSocket for real-time dashboard updates."""
+    await websocket.accept()
+    active_websockets.append(websocket)
+    logger.debug(f"WebSocket connected. Total: {len(active_websockets)}")
+
+    try:
+        while True:
+            # Send periodic updates
+            data = await get_dashboard_data()
+            await websocket.send_text(json.dumps(data))
+            await asyncio.sleep(settings.DASHBOARD_UPDATE_INTERVAL)
+    except WebSocketDisconnect:
+        active_websockets.remove(websocket)
+        logger.debug(f"WebSocket disconnected. Total: {len(active_websockets)}")
+    except Exception as e:
+        logger.error(f"WebSocket error: {e}")
+        if websocket in active_websockets:
+            active_websockets.remove(websocket)
+
+
+async def broadcast_update(data: dict) -> None:
+    """Broadcast update to all connected WebSockets."""
+    disconnected = []
+    for ws in active_websockets:
+        try:
+            await ws.send_text(json.dumps(data))
+        except Exception:
+            disconnected.append(ws)
+
+    for ws in disconnected:
+        active_websockets.remove(ws)
+
+
+# =========================================================================
+# Server-Sent Events (alternative to WebSocket)
+# =========================================================================
+
+@app.get("/events")
+async def sse_endpoint():
+    """Server-Sent Events endpoint for real-time updates."""
+
+    async def event_generator():
+        while True:
+            data = await get_dashboard_data()
+            yield f"data: {json.dumps(data)}\n\n"
+            await asyncio.sleep(settings.DASHBOARD_UPDATE_INTERVAL)
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+
+# =========================================================================
+# Data Endpoints
+# =========================================================================
+
+async def get_dashboard_data() -> dict[str, Any]:
+    """Aggregate all dashboard data."""
+    data = {
+        "timestamp": datetime.now().isoformat(),
+        "mode": settings.MODE,
+        "connected": ib_manager.state.connected if ib_manager else False,
+    }
+
+    # Account & Portfolio
+    if ib_manager and ib_manager.state.connected:
+        try:
+            account = await ib_manager.get_account_summary()
+            positions = await ib_manager.get_positions()
+
+            data["account"] = {
+                "equity": float(account.get("NetLiquidation", 0)),
+                "cash": float(account.get("TotalCashValue", 0)),
+                "buying_power": float(account.get("BuyingPower", 0)),
+                "daily_pnl": float(account.get("DailyPnL", 0)),
+            }
+
+            data["positions"] = [
+                {
+                    "symbol": p.contract.symbol,
+                    "quantity": p.position,
+                    "avg_cost": p.avgCost,
+                    "market_value": p.position * p.avgCost,  # Approximate
+                }
+                for p in positions if p.position != 0
+            ]
+        except Exception as e:
+            logger.error(f"Failed to get account data: {e}")
+            data["account"] = {}
+            data["positions"] = []
+
+    # Market Data
+    if market_data:
+        data["market_data"] = market_data.get_status()
+
+    # Risk Metrics
+    if risk_manager:
+        metrics = risk_manager.get_risk_metrics()
+        data["risk"] = {
+            "total_exposure": metrics.total_exposure,
+            "daily_pnl": metrics.daily_pnl,
+            "current_drawdown": metrics.current_drawdown,
+            "max_drawdown": metrics.max_drawdown,
+            "open_positions": metrics.open_positions,
+            "win_rate": metrics.win_rate,
+            "profit_factor": metrics.profit_factor,
+            "sharpe_ratio": metrics.sharpe_ratio,
+        }
+
+    # Strategy Signals
+    if strategy_registry:
+        active_strategy = strategy_registry.get_active()
+        if active_strategy:
+            data["strategy"] = {
+                "name": active_strategy.strategy_name,
+                "enabled": active_strategy.parameters.enabled,
+                "symbols": active_strategy.get_symbols(),
+                "recent_signals": [
+                    {
+                        "symbol": s.symbol,
+                        "type": s.signal_type.value,
+                        "strength": s.strength.name,
+                        "price": s.price,
+                        "time": s.timestamp.strftime("%H:%M:%S"),
+                    }
+                    for s in active_strategy.signals[-20:]
+                ],
+            }
+
+            # SMC specific
+            if hasattr(active_strategy, "get_smc_state"):
+                smc_states = {}
+                for symbol in active_strategy.get_symbols():
+                    smc_states[symbol] = active_strategy.get_smc_state(symbol)
+                data["strategy"]["smc"] = smc_states
+
+    # LLM Reviewer
+    if llm_reviewer:
+        data["llm_reviewer"] = llm_reviewer.get_status()
+
+    return data
+
+
+@app.get("/api/status")
+async def api_status():
+    """Get system status."""
+    return await get_dashboard_data()
+
+
+@app.get("/api/account")
+async def api_account():
+    """Get account info."""
+    if not ib_manager or not ib_manager.state.connected:
+        return {"error": "Not connected"}
+
+    account = await ib_manager.get_account_summary()
+    positions = await ib_manager.get_positions()
+
+    return {
+        "account": account,
+        "positions": [
+            {
+                "symbol": p.contract.symbol,
+                "quantity": p.position,
+                "avg_cost": p.avgCost,
+            }
+            for p in positions if p.position != 0
+        ],
+    }
+
+
+@app.get("/api/market/{symbol}")
+async def api_market(symbol: str):
+    """Get market data for symbol."""
+    if not market_data:
+        return {"error": "Market data not initialized"}
+
+    df = market_data.get_bars(symbol, count=100)
+    if df.empty:
+        return {"error": "No data"}
+
+    return {
+        "symbol": symbol,
+        "bars": df.reset_index().to_dict("records"),
+        "latest_price": market_data.get_latest_price(symbol),
+    }
+
+
+@app.get("/api/smc/{symbol}")
+async def api_smc(symbol: str):
+    """Get SMC analysis for symbol."""
+    if not strategy_registry:
+        return {"error": "Strategy registry not initialized"}
+
+    smc_strategy = strategy_registry.get("smc")
+    if not smc_strategy:
+        return {"error": "SMC strategy not active"}
+
+    state = smc_strategy.get_smc_state(symbol)
+    df = market_data.get_bars(symbol, count=200) if market_data else None
+
+    # Add chart data for SMC levels
+    chart_data = {}
+    if df is not None and not df.empty:
+        chart_data = {
+            "timestamps": df.index.astype(str).tolist(),
+            "open": df["open"].tolist(),
+            "high": df["high"].tolist(),
+            "low": df["low"].tolist(),
+            "close": df["close"].tolist(),
+        }
+
+    return {
+        "symbol": symbol,
+        "state": state,
+        "chart": chart_data,
+    }
+
+
+@app.get("/api/risk")
+async def api_risk():
+    """Get risk metrics."""
+    if not risk_manager:
+        return {"error": "Risk manager not initialized"}
+
+    metrics = risk_manager.get_risk_metrics()
+    return {
+        "total_exposure": metrics.total_exposure,
+        "daily_pnl": metrics.daily_pnl,
+        "current_drawdown": metrics.current_drawdown,
+        "max_drawdown": metrics.max_drawdown,
+        "open_positions": metrics.open_positions,
+        "win_rate": metrics.win_rate,
+        "profit_factor": metrics.profit_factor,
+        "sharpe_ratio": metrics.sharpe_ratio,
+        "should_reduce": risk_manager.should_reduce_risk()[0],
+    }
+
+
+@app.get("/api/reviews")
+async def api_reviews():
+    """Get LLM review history."""
+    if not llm_reviewer:
+        return {"error": "LLM reviewer not initialized"}
+
+    return {
+        "history": llm_reviewer.get_review_history(10),
+        "status": llm_reviewer.get_status(),
+    }
+
+
+@app.post("/api/review/trigger")
+async def api_trigger_review():
+    """Manually trigger LLM review."""
+    if not llm_reviewer:
+        return {"error": "LLM reviewer not initialized"}
+
+    review = await llm_reviewer.trigger_review()
+    return {"success": True, "review": review.model_dump() if review else None}
+
+
+@app.post("/api/emergency_stop")
+async def api_emergency_stop(reason: str = "Manual emergency stop"):
+    """Trigger emergency stop."""
+    from src.compliance.logger import get_operation_logger
+    logger = get_operation_logger()
+    logger.log_stop(reason, "dashboard_user")
+
+    return {"success": True, "message": "Emergency stop logged"}
+
+
+# =========================================================================
+# HTML Dashboard
+# =========================================================================
+
+@app.get("/", response_class=HTMLResponse)
+async def dashboard(request: Request):
+    """Main dashboard page."""
+    return templates.TemplateResponse("dashboard.html", {"request": request})
+
+
+# Create default dashboard template
+def _create_dashboard_template():
+    """Create the dashboard HTML template."""
+    template_content = """<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WIC 2026 Trading Agent Dashboard</title>
+    <script src="https://unpkg.com/htmx.org@1.9.10"></script>
+    <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg: #0d1117;
+            --bg-secondary: #161b22;
+            --bg-tertiary: #21262d;
+            --border: #30363d;
+            --text: #e6edf3;
+            --text-muted: #8b949e;
+            --accent: #58a6ff;
+            --accent-hover: #79c0ff;
+            --success: #3fb950;
+            --warning: #d29922;
+            --danger: #f85149;
+            --chart-bg: #161b22;
+        }
+        * { font-family: 'Inter', sans-serif; }
+        .mono { font-family: 'JetBrains Mono', monospace; }
+        .scrollbar-thin::-webkit-scrollbar { width: 6px; height: 6px; }
+        .scrollbar-thin::-webkit-scrollbar-track { background: var(--bg); }
+        .scrollbar-thin::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+    </style>
+</head>
+<body class="bg-[var(--bg)] text-[var(--text)] min-h-screen" hx-ext="ws" ws-connect="/ws">
+    <!-- Header -->
+    <header class="border-b border-[var(--border)] bg-[var(--bg-secondary)] sticky top-0 z-50">
+        <div class="max-w-full mx-auto px-4 py-3 flex items-center justify-between">
+            <div class="flex items-center gap-3">
+                <div class="w-8 h-8 bg-gradient-to-br from-blue-500 to-purple-600 rounded-lg flex items-center justify-center">
+                    <svg class="w-5 h-5 text-white" fill="currentColor" viewBox="0 0 24 24"><path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/></svg>
+                </div>
+                <h1 class="text-xl font-semibold">WIC 2026 Trading Agent</h1>
+                <span class="px-2 py-0.5 text-xs font-medium rounded-full bg-[var(--bg-tertiary)] text-[var(--text-muted)]" id="mode-badge">DEV</span>
+            </div>
+            <div class="flex items-center gap-4">
+                <div class="flex items-center gap-2">
+                    <span class="text-sm text-[var(--text-muted)]">Connection:</span>
+                    <span class="w-2 h-2 rounded-full bg-[var(--danger)]" id="conn-indicator"></span>
+                    <span class="text-sm mono" id="conn-status">Disconnected</span>
+                </div>
+                <div class="flex items-center gap-2">
+                    <span class="text-sm text-[var(--text-muted)]">Equity:</span>
+                    <span class="text-lg font-semibold mono text-[var(--success)]" id="equity">$0.00</span>
+                </div>
+                <button hx-post="/api/emergency_stop" hx-confirm="Emergency stop? This will log a stop event." class="px-3 py-1.5 text-sm bg-[var(--danger)] hover:bg-red-600 rounded-lg transition">Emergency Stop</button>
+            </div>
+        </div>
+    </header>
+
+    <!-- Main Content -->
+    <main class="max-w-full mx-auto px-4 py-6 grid grid-cols-1 lg:grid-cols-3 gap-4">
+        <!-- Left Column: Account & Positions -->
+        <div class="lg:col-span-1 space-y-4">
+            <!-- Account Card -->
+            <div class="bg-[var(--bg-secondary)] border border-[var(--border)] rounded-xl p-4">
+                <h2 class="font-semibold mb-3 flex items-center gap-2">
+                    <svg class="w-5 h-5 text-[var(--accent)]" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v8m0 0v1m0-1c-1.11 0-2.08-.402-2.599-1M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+                    Account
+                </h2>
+                <div class="space-y-2 text-sm">
+                    <div class="flex justify-between">
+                        <span class="text-[var(--text-muted)]">Equity</span>
+                        <span class="font-semibold mono text-[var(--success)]" id="eq-equity">$0.00</span>
+                    </div>
+                    <div class="flex justify-between">
+                        <span class="text-[var(--text-muted)]">Cash</span>
+                        <span class="mono" id="eq-cash">$0.00</span>
+                    </div>
+                    <div class="flex justify-between">
+                        <span class="text-[var(--text-muted)]">Buying Power</span>
+                        <span class="mono" id="eq-bp">$0.00</span>
+                    </div>
+                    <div class="flex justify-between border-t border-[var(--border)] pt-2">
+                        <span class="text-[var(--text-muted)]">Daily P&L</span>
+                        <span class="font-semibold mono" id="eq-pnl">$0.00</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Positions -->
+            <div class="bg-[var(--bg-secondary)] border border-[var(--border)] rounded-xl p-4">
+                <h2 class="font-semibold mb-3 flex items-center gap-2">
+                    <svg class="w-5 h-5 text-[var(--accent)]" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"/></svg>
+                    Positions
+                </h2>
+                <div class="scrollbar-thin max-h-64 overflow-y-auto" id="positions-list">
+                    <div class="text-[var(--text-muted)] text-sm text-center py-8">No positions</div>
+                </div>
+            </div>
+
+            <!-- Risk Metrics -->
+            <div class="bg-[var(--bg-secondary)] border border-[var(--border)] rounded-xl p-4">
+                <h2 class="font-semibold mb-3 flex items-center gap-2">
+                    <svg class="w-5 h-5 text-[var(--warning)]" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/></svg>
+                    Risk Metrics
+                </h2>
+                <div class="grid grid-cols-2 gap-3 text-sm">
+                    <div class="bg-[var(--bg-tertiary)] rounded-lg p-3">
+                        <div class="text-[var(--text-muted)] text-xs">Daily P&L</div>
+                        <div class="font-semibold mono" id="risk-pnl">$0.00</div>
+                    </div>
+                    <div class="bg-[var(--bg-tertiary)] rounded-lg p-3">
+                        <div class="text-[var(--text-muted)] text-xs">Drawdown</div>
+                        <div class="font-semibold mono text-[var(--danger)]" id="risk-dd">0.00%</div>
+                    </div>
+                    <div class="bg-[var(--bg-tertiary)] rounded-lg p-3">
+                        <div class="text-[var(--text-muted)] text-xs">Max DD</div>
+                        <div class="font-semibold mono" id="risk-maxdd">0.00%</div>
+                    </div>
+                    <div class="bg-[var(--bg-tertiary)] rounded-lg p-3">
+                        <div class="text-[var(--text-muted)] text-xs">Positions</div>
+                        <div class="font-semibold mono" id="risk-pos">0</div>
+                    </div>
+                    <div class="bg-[var(--bg-tertiary)] rounded-lg p-3 col-span-2">
+                        <div class="text-[var(--text-muted)] text-xs">Win Rate / Profit Factor / Sharpe</div>
+                        <div class="font-semibold mono flex gap-4" id="risk-stats">0% / 0.00 / 0.00</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Center Column: Charts & Strategy -->
+        <div class="lg:col-span-2 space-y-4">
+            <!-- Price Chart -->
+            <div class="bg-[var(--bg-secondary)] border border-[var(--border)] rounded-xl p-4">
+                <div class="flex items-center justify-between mb-3">
+                    <h2 class="font-semibold flex items-center gap-2">
+                        <svg class="w-5 h-5 text-[var(--accent)]" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"/></svg>
+                        Price Chart
+                    </h2>
+                    <select class="text-sm bg-[var(--bg-tertiary)] border border-[var(--border)] rounded px-2 py-1" id="chart-symbol" hx-get="/api/market/{symbol}" hx-trigger="change" hx-target="#chart-container" hx-swap="innerHTML">
+                        <option value="SPY">SPY</option>
+                        <option value="QQQ">QQQ</option>
+                        <option value="AAPL">AAPL</option>
+                        <option value="MSFT">MSFT</option>
+                        <option value="NVDA">NVDA</option>
+                    </select>
+                </div>
+                <div id="chart-container" class="h-80" hx-get="/api/market/SPY" hx-trigger="load"></div>
+            </div>
+
+            <!-- Strategy Signals -->
+            <div class="bg-[var(--bg-secondary)] border border-[var(--border)] rounded-xl p-4">
+                <h2 class="font-semibold mb-3 flex items-center gap-2">
+                    <svg class="w-5 h-5 text-[var(--success)]" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"/></svg>
+                    Strategy Signals
+                </h2>
+                <div class="scrollbar-thin max-h-64 overflow-y-auto" id="signals-list">
+                    <div class="text-[var(--text-muted)] text-sm text-center py-8">No signals yet</div>
+                </div>
+            </div>
+
+            <!-- SMC Analysis -->
+            <div class="bg-[var(--bg-secondary)] border border-[var(--border)] rounded-xl p-4" id="smc-panel" style="display: none;">
+                <h2 class="font-semibold mb-3 flex items-center gap-2">
+                    <svg class="w-5 h-5 text-[var(--accent)]" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"/></svg>
+                    SMC Analysis
+                </h2>
+                <div class="grid grid-cols-2 md:grid-cols-4 gap-3 text-sm" id="smc-grid">
+                    <!-- Populated by JS -->
+                </div>
+            </div>
+        </div>
+
+        <!-- Right Column: LLM Review & Logs -->
+        <div class="lg:col-span-1 space-y-4">
+            <!-- LLM Reviewer -->
+            <div class="bg-[var(--bg-secondary)] border border-[var(--border)] rounded-xl p-4">
+                <div class="flex items-center justify-between mb-3">
+                    <h2 class="font-semibold flex items-center gap-2">
+                        <svg class="w-5 h-5 text-[var(--accent)]" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z"/></svg>
+                        LLM Reviewer
+                    </h2>
+                    <button hx-post="/api/review/trigger" class="px-2 py-1 text-xs bg-[var(--accent)] hover:bg-blue-600 rounded">Review Now</button>
+                </div>
+                <div class="space-y-2 text-sm" id="review-status">
+                    <div class="flex justify-between">
+                        <span class="text-[var(--text-muted)]">Status</span>
+                        <span class="font-medium" id="rev-status">Idle</span>
+                    </div>
+                    <div class="flex justify-between">
+                        <span class="text-[var(--text-muted)]">Last Review</span>
+                        <span class="mono" id="rev-last">Never</span>
+                    </div>
+                    <div class="flex justify-between">
+                        <span class="text-[var(--text-muted)]">Next Review</span>
+                        <span class="mono" id="rev-next">--</span>
+                    </div>
+                    <div class="flex justify-between">
+                        <span class="text-[var(--text-muted)]">Provider</span>
+                        <span class="mono" id="rev-provider">--</span>
+                    </div>
+                </div>
+                <div class="mt-3 p-3 bg-[var(--bg-tertiary)] rounded-lg text-xs text-[var(--text-muted)]" id="rev-latest">
+                    No reviews yet
+                </div>
+            </div>
+
+            <!-- Recent Reviews -->
+            <div class="bg-[var(--bg-secondary)] border border-[var(--border)] rounded-xl p-4">
+                <h2 class="font-semibold mb-3">Recent Reviews</h2>
+                <div class="scrollbar-thin max-h-64 overflow-y-auto" id="reviews-list">
+                    <div class="text-[var(--text-muted)] text-sm text-center py-8">No reviews</div>
+                </div>
+            </div>
+
+            <!-- System Logs -->
+            <div class="bg-[var(--bg-secondary)] border border-[var(--border)] rounded-xl p-4">
+                <h2 class="font-semibold mb-3">System Events</h2>
+                <div class="scrollbar-thin max-h-64 overflow-y-auto mono text-xs" id="system-logs">
+                    <div class="text-[var(--text-muted)] text-center py-8">Loading...</div>
+                </div>
+            </div>
+        </div>
+    </main>
+
+    <script>
+        // Chart rendering
+        function renderChart(data) {
+            if (!data || !data.bars || data.bars.length === 0) return;
+
+            const timestamps = data.bars.map(b => b.timestamp);
+            const opens = data.bars.map(b => b.open);
+            const highs = data.bars.map(b => b.high);
+            const lows = data.bars.map(b => b.low);
+            const closes = data.bars.map(b => b.close);
+
+            const trace = {
+                x: timestamps,
+                open: opens,
+                high: highs,
+                low: lows,
+                close: closes,
+                type: 'candlestick',
+                name: data.symbol,
+                increasing: {line: {color: '#3fb950'}},
+                decreasing: {line: {color: '#f85149'}}
+            };
+
+            const layout = {
+                template: 'plotly_dark',
+                paper_bgcolor: '#161b22',
+                plot_bgcolor: '#161b22',
+                font: {color: '#e6edf3', family: 'JetBrains Mono'},
+                margin: {l: 50, r: 20, t: 30, b: 40},
+                xaxis: {rangeslider: {visible: false}, gridcolor: '#30363d'},
+                yaxis: {gridcolor: '#30363d', fixedrange: false},
+                dragmode: 'pan',
+                showlegend: false
+            };
+
+            Plotly.newPlot('chart-container', [trace], layout, {displayModeBar: false, responsive: true});
+        }
+
+        // HTMX response handling for chart
+        document.body.addEventListener('htmx:afterSwap', function(evt) {
+            if (evt.detail.target.id === 'chart-container') {
+                try {
+                    const data = JSON.parse(evt.detail.target.innerText);
+                    renderChart(data);
+                } catch (e) {}
+            }
+        });
+
+        // WebSocket handling
+        const ws = new WebSocket('ws://' + window.location.host + '/ws');
+        ws.onmessage = function(event) {
+            const data = JSON.parse(event.data);
+            updateDashboard(data);
+        };
+
+        function updateDashboard(data) {
+            // Mode badge
+            const modeBadge = document.getElementById('mode-badge');
+            if (modeBadge) modeBadge.textContent = data.mode?.toUpperCase() || 'DEV';
+
+            // Connection status
+            const connIndicator = document.getElementById('conn-indicator');
+            const connStatus = document.getElementById('conn-status');
+            if (data.connected) {
+                connIndicator.className = 'w-2 h-2 rounded-full bg-[var(--success)]';
+                connStatus.textContent = 'Connected';
+            } else {
+                connIndicator.className = 'w-2 h-2 rounded-full bg-[var(--danger)]';
+                connStatus.textContent = 'Disconnected';
+            }
+
+            // Account
+            if (data.account) {
+                document.getElementById('equity').textContent = '$' + (data.account.equity || 0).toLocaleString(undefined, {minimumFractionDigits: 2});
+                document.getElementById('eq-equity').textContent = '$' + (data.account.equity || 0).toLocaleString(undefined, {minimumFractionDigits: 2});
+                document.getElementById('eq-cash').textContent = '$' + (data.account.cash || 0).toLocaleString(undefined, {minimumFractionDigits: 2});
+                document.getElementById('eq-bp').textContent = '$' + (data.account.buying_power || 0).toLocaleString(undefined, {minimumFractionDigits: 2});
+                const pnl = data.account.daily_pnl || 0;
+                document.getElementById('eq-pnl').textContent = '$' + pnl.toLocaleString(undefined, {minimumFractionDigits: 2});
+                document.getElementById('eq-pnl').className = 'font-semibold mono ' + (pnl >= 0 ? 'text-[var(--success)]' : 'text-[var(--danger)]');
+            }
+
+            // Positions
+            if (data.positions) {
+                const container = document.getElementById('positions-list');
+                if (data.positions.length === 0) {
+                    container.innerHTML = '<div class="text-[var(--text-muted)] text-sm text-center py-8">No positions</div>';
+                } else {
+                    container.innerHTML = data.positions.map(p => `
+                        <div class="flex justify-between items-center py-2 border-b border-[var(--border)] last:border-0">
+                            <div>
+                                <div class="font-medium">${p.symbol}</div>
+                                <div class="text-xs text-[var(--text-muted)]">${p.quantity > 0 ? 'Long' : 'Short'} ${Math.abs(p.quantity)} @ $${p.avg_cost?.toFixed(2) || 'N/A'}</div>
+                            </div>
+                            <div class="text-right mono">${p.market_value ? '$' + p.market_value.toLocaleString(undefined, {minimumFractionDigits: 2}) : 'N/A'}</div>
+                        </div>
+                    `).join('');
+                }
+            }
+
+            // Risk
+            if (data.risk) {
+                document.getElementById('risk-pnl').textContent = '$' + (data.risk.daily_pnl || 0).toLocaleString(undefined, {minimumFractionDigits: 2});
+                document.getElementById('risk-pnl').className = 'font-semibold mono ' + ((data.risk.daily_pnl || 0) >= 0 ? 'text-[var(--success)]' : 'text-[var(--danger)]');
+                document.getElementById('risk-dd').textContent = (data.risk.current_drawdown * 100 || 0).toFixed(2) + '%';
+                document.getElementById('risk-maxdd').textContent = (data.risk.max_drawdown * 100 || 0).toFixed(2) + '%';
+                document.getElementById('risk-pos').textContent = data.risk.open_positions || 0;
+                document.getElementById('risk-stats').textContent =
+                    (data.risk.win_rate * 100 || 0).toFixed(1) + '% / ' +
+                    (data.risk.profit_factor || 0).toFixed(2) + ' / ' +
+                    (data.risk.sharpe_ratio || 0).toFixed(2);
+            }
+
+            // Strategy
+            if (data.strategy) {
+                // Signals
+                const signalsContainer = document.getElementById('signals-list');
+                if (data.strategy.recent_signals && data.strategy.recent_signals.length > 0) {
+                    signalsContainer.innerHTML = data.strategy.recent_signals.slice(0, 20).map(s => `
+                        <div class="flex justify-between items-center py-2 border-b border-[var(--border)] last:border-0">
+                            <div class="flex items-center gap-2">
+                                <span class="px-1.5 py-0.5 text-xs rounded ${s.type === 'buy' ? 'bg-green-500/20 text-green-400' : 'bg-red-500/20 text-red-400'}">${s.type.toUpperCase()}</span>
+                                <span class="font-medium">${s.symbol}</span>
+                                <span class="text-xs text-[var(--text-muted)]">${s.strength}</span>
+                            </div>
+                            <div class="text-right">
+                                <div class="mono">$${s.price.toFixed(2)}</div>
+                                <div class="text-xs text-[var(--text-muted)]">${s.time}</div>
+                            </div>
+                        </div>
+                    `).join('');
+                }
+
+                // SMC
+                if (data.strategy.smc) {
+                    document.getElementById('smc-panel').style.display = 'block';
+                    const smcGrid = document.getElementById('smc-grid');
+                    const symbols = Object.keys(data.strategy.smc);
+                    if (symbols.length > 0) {
+                        const sym = symbols[0]; // Show first symbol
+                        const s = data.strategy.smc[sym];
+                        smcGrid.innerHTML = `
+                            <div class="bg-[var(--bg-tertiary)] rounded-lg p-3"><div class="text-[var(--text-muted)] text-xs">Structure Events</div><div class="font-semibold">${s.structure_events}</div></div>
+                            <div class="bg-[var(--bg-tertiary)] rounded-lg p-3"><div class="text-[var(--text-muted)] text-xs">Bullish OBs</div><div class="font-semibold text-[var(--success)]">${s.order_blocks.bullish}</div></div>
+                            <div class="bg-[var(--bg-tertiary)] rounded-lg p-3"><div class="text-[var(--text-muted)] text-xs">Bearish OBs</div><div class="font-semibold text-[var(--danger)]">${s.order_blocks.bearish}</div></div>
+                            <div class="bg-[var(--bg-tertiary)] rounded-lg p-3"><div class="text-[var(--text-muted)] text-xs">Mitigated</div><div class="font-semibold">${s.order_blocks.mitigated}</div></div>
+                            <div class="bg-[var(--bg-tertiary)] rounded-lg p-3"><div class="text-[var(--text-muted)] text-xs">Bullish FVGs</div><div class="font-semibold">${s.fvg.bullish_open}</div></div>
+                            <div class="bg-[var(--bg-tertiary)] rounded-lg p-3"><div class="text-[var(--text-muted)] text-xs">Bearish FVGs</div><div class="font-semibold">${s.fvg.bearish_open}</div></div>
+                            <div class="bg-[var(--bg-tertiary)] rounded-lg p-3"><div class="text-[var(--text-muted)] text-xs">Buy Liquidity</div><div class="font-semibold">${s.liquidity.buy_side}</div></div>
+                            <div class="bg-[var(--bg-tertiary)] rounded-lg p-3"><div class="text-[var(--text-muted)] text-xs">Sell Liquidity</div><div class="font-semibold">${s.liquidity.sell_side}</div></div>
+                        `;
+                    }
+                }
+            }
+
+            // LLM Reviewer
+            if (data.llm_reviewer) {
+                document.getElementById('rev-status').textContent = data.llm_reviewer.running ? 'Running' : 'Stopped';
+                document.getElementById('rev-last').textContent = data.llm_reviewer.last_review ? new Date(data.llm_reviewer.last_review).toLocaleString() : 'Never';
+                document.getElementById('rev-next').textContent = data.llm_reviewer.next_review ? new Date(data.llm_reviewer.next_review).toLocaleString() : '--';
+                document.getElementById('rev-provider').textContent = data.llm_reviewer.provider || '--';
+
+                // Latest review
+                if (data.llm_reviewer.reviews_count > 0) {
+                    const latest = data.llm_reviewer.history?.[0];
+                    if (latest) {
+                        document.getElementById('rev-latest').innerHTML = `
+                            <div class="font-medium">${latest.review?.overall_assessment || 'Review completed'}</div>
+                            <div class="text-xs mt-1">Confidence: ${(latest.review?.confidence * 100 || 0).toFixed(0)}%</div>
+                        `;
+                    }
+                }
+            }
+
+            // Reviews list
+            if (data.llm_reviewer?.history) {
+                const reviewsContainer = document.getElementById('reviews-list');
+                reviewsContainer.innerHTML = data.llm_reviewer.history.map(r => `
+                    <div class="p-3 bg-[var(--bg-tertiary)] rounded-lg border border-[var(--border)]">
+                        <div class="flex justify-between text-xs mb-1">
+                            <span class="text-[var(--text-muted)]">${new Date(r.timestamp).toLocaleString()}</span>
+                            <span class="font-medium">${(r.review?.confidence * 100 || 0).toFixed(0)}% confidence</span>
+                        </div>
+                        <div class="text-sm">${r.review?.overall_assessment || 'No assessment'}</div>
+                    </div>
+                `).join('');
+            }
+        }
+
+        // Initial load
+        document.addEventListener('DOMContentLoaded', async () => {
+            // Load initial data via API
+            try {
+                const res = await fetch('/api/status');
+                const data = await res.json();
+                updateDashboard(data);
+            } catch (e) {}
+        });
+    </script>
+</body>
+</html>"""
+
+    (templates_dir / "dashboard.html").write_text(template_content)
+
+
+_create_dashboard_template()

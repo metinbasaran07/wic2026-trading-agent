@@ -1,0 +1,39 @@
+# Pre-Report: World Investment Competition 2026 - AI Agent Division
+
+## Team Information
+- **Team Name**: {{ data.team_name }}
+- **Members**: {% for m in data.team_members %}{{ m }}{% if not loop.last %}, {% endif %}{% endfor %}
+- **Organization**: {{ data.organization }}
+
+## Strategy Overview
+- **Strategy**: {{ data.strategy_name }}
+- **Description**: {{ data.strategy_description }}
+- **Return Hypothesis**: {{ data.hypothesis }}
+
+## Decision Making Process
+{{ data.decision_process }}
+
+### LLM Role
+{{ data.llm_role }}
+
+### Order Placement Logic
+{{ data.order_logic }}
+
+## Risk Management
+{{ data.risk_management }}
+
+## Change Policy
+{{ data.change_policy }}
+
+## Technical Configuration
+- **Symbols**: {{ data.symbols | join(", ") }}
+- **Timeframe**: {{ data.timeframe }}
+- **Data Sources**: {{ data.data_sources | join(", ") }}
+
+## LLM Configuration
+- **Provider**: {{ data.llm_provider }}
+- **Model**: {{ data.llm_model }}
+- **Spending Cap**: ${{ "%.2f"|format(data.llm_spending_cap) }}
+
+---
+*Generated: {{ timestamp }}*

@@ -1,0 +1,30 @@
+{
+  "team_name": "Your Team Name",
+  "team_members": [
+    "Member 1",
+    "Member 2"
+  ],
+  "organization": "Your University",
+  "strategy_name": "smc",
+  "strategy_description": "Smart Money Concepts strategy with Order Blocks, FVG, and Market Structure analysis",
+  "hypothesis": "Expected 15-20% annual return with max 5% drawdown using SMC strategy with LLM review",
+  "decision_process": "Quantitative SMC strategy generates signals; LLM reviews strategy hourly and adjusts parameters",
+  "llm_role": "LLM reviews strategy performance hourly, suggests parameter adjustments, and validates risk settings",
+  "order_logic": "Limit orders placed at Order Block levels with 2:1 risk:reward, stop loss below/above OB",
+  "risk_management": "1% risk per trade, max 10% per position, 5% daily drawdown limit, sector limits",
+  "change_policy": "All parameter changes logged and require LLM review approval. Code changes require human authorization.",
+  "symbols": [
+    "SPY",
+    "QQQ",
+    "AAPL",
+    "MSFT",
+    "NVDA"
+  ],
+  "timeframe": "15 mins",
+  "data_sources": [
+    "IB 15-min delayed data"
+  ],
+  "llm_provider": "openrouter",
+  "llm_model": "anthropic/claude-3.5-sonnet",
+  "llm_spending_cap": 100.0
+}

@@ -1,0 +1,57 @@
+[project]
+name = "wic2026-trading-agent"
+version = "0.1.0"
+description = "AI Agent Trading Workstation for World Investment Competition 2026"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "ib-insync>=0.9.86",
+    "pandas>=2.0",
+    "numpy>=1.24",
+    "pydantic>=2.5",
+    "pydantic-settings>=2.1",
+    "openai>=1.0",
+    "apscheduler>=3.10",
+    "loguru>=0.7",
+    "jinja2>=3.1",
+    "pyyaml>=6.0",
+    "click>=8.1",
+    "fastapi>=0.104",
+    "uvicorn>=0.24",
+    "plotly>=5.17",
+    "httpx>=0.25",
+    "python-dotenv>=1.0",
+    "structlog>=25.5",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4",
+    "pytest-asyncio>=0.21",
+    "pytest-cov>=4.1",
+    "ruff>=0.1",
+    "mypy>=1.7",
+    "pre-commit>=3.5",
+]
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py39"
+select = ["E", "F", "I", "UP", "W", "C90"]
+
+[tool.mypy]
+python_version = "3.9"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = false
