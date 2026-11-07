@@ -2,10 +2,9 @@
 # WIC 2026 Trading Agent - Setup App
 # Double-click to run
 
-cd "$(dirname "$0")/../../.."
-exec python3 -c "
-import sys
-sys.path.insert(0, '.')
-from setup_app import main
-main()
-"
+# Get the directory where this app bundle is located
+DIR="$(cd "$(dirname "$0")/../../.." && pwd)"
+cd "$DIR"
+
+# Run the setup app
+exec python3 setup_app.py

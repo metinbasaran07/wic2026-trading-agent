@@ -94,11 +94,20 @@ class SetupApp:
         y = (self.root.winfo_screenheight() // 2) - (h // 2)
         self.root.geometry(f"{w}x{h}+{x}+{y}")
 
-        # macOS: bring window to front and focus
+        # macOS: aggressive window focus
         self.root.lift()
         self.root.attributes('-topmost', True)
-        self.root.after(100, lambda: self.root.attributes('-topmost', False))
         self.root.focus_force()
+        self.root.after(50, lambda: self.root.attributes('-topmost', False))
+        self.root.after(100, lambda: self.root.lift())
+        self.root.after(150, lambda: self.root.focus_force())
+
+        # Also try macOS-specific
+        try:
+            import subprocess
+            subprocess.run(['osascript', '-e', 'tell application "System Events" to set frontmost of process "Python" to true'], capture_output=True)
+        except:
+            pass
 
     def setup_styles(self):
         style = ttk.Style()
